@@ -1,0 +1,195 @@
+---
+- name: Provision ec2 instances based on the environment
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    region: eu-west-1
+    db_name: myTestDB
+    db_user: myuser
+    db_password: 12345678
+    version: 2.0.0
+    instance_num: 1
+
+  tasks:
+    - name: create VPC
+      ec2_vpc_net:
+        name: "my-vpc"
+        cidr_block: 10.10.0.0/24
+        region: "{{region}}"
+        state: present
+        tags:
+          Environment: MyTest
+      register: vpc
+
+  
+    - name: Create app subnet
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{region}}"
+        cidr: "10.10.0.0/26"
+        map_public: yes
+        tags:
+          Environment: MyTest
+      register: app_subnet
+
+    - name: db1 subnet
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{region}}"
+        az: "{{region}}a"
+        cidr: "10.10.0.64/26"
+        map_public: no
+        tags:
+          Environment: MyTest
+      register: db_subnet1
+
+    - name: db2 subnet
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{region}}"
+        cidr: "10.10.0.128/26"
+        az: "{{region}}b"
+        map_public: no
+        tags:
+          Environment: MyTest
+      register: db_subnet2
+
+    - name: create IGW
+      ec2_vpc_igw:
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{region}}"
+        state: "present"
+        tags:
+          Environment: MyTest
+      register: igw
+  
+    - name: Set up public subnet route table
+      ec2_vpc_route_table:
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{region}}"
+        tags:
+          Name: Public
+          Environment: MyTest
+        subnets:
+          - "{{ app_subnet.subnet.id }}"
+        routes:
+          - dest: 0.0.0.0/0
+            gateway_id: "{{ igw.gateway_id }}"
+      register: public_route_table
+
+    - name: Create Security Group for ELB
+      ec2_group:
+        name: elb_sg
+        description: Security Group for ELB
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            ports:
+            - 80
+            cidr_ip: 0.0.0.0/0
+        tags:
+          Environment: MyTest
+      register: elb_sg
+
+    - name: Create Security Group for App server
+      ec2_group:
+        name: appserverLB
+        description: Application Server
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            ports:
+              - 8081
+            group_id: "{{ elb_sg.group_id }}"
+          - proto: tcp
+            ports:
+            - 22
+            cidr_ip: 0.0.0.0/0
+        tags:
+          Environment: MyTest
+      register: app_sg
+
+    - name: Create Security Group for DB server
+      ec2_group:
+        name: db_server_sg
+        description: DB Server
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            ports:
+              - 3306
+            group_id: "{{ app_sg.group_id }}"
+        tags:
+          Environment: MyTest
+      register: db_sg
+
+    - name: Creating RDS subnet group
+      rds_subnet_group:
+        state: present
+        name: norwegian-blue
+        region: "{{ region }}"
+        description: My Fancy Ex Parrot Subnet Group
+        subnets: 
+          - "{{db_subnet1.subnet.id}}"
+          - "{{db_subnet2.subnet.id}}"
+      register: rds_subnet_group
+    - debug:
+        msg: "RDS subnet group: {{rds_subnet_group}}"
+
+    - name: Create DB
+      rds:
+        instance_name: 'database'
+        db_name: "{{ db_name }}"
+        command: create
+        region: "{{ region }}"
+        db_engine: MySQL
+        size: 10
+        instance_type: db.t2.small
+        username: "{{ db_user }}"
+        password: "{{ db_password }}"
+        vpc_security_groups: "{{db_sg.group_id}}"
+        wait: yes
+        subnet: "{{ rds_subnet_group.subnet_group.name }}"
+        tags:
+          Environment: MyTest
+      register: rds
+
+    - name: create a new ec2 key pair
+      ec2_key:
+        name: provisioner
+        region: "{{ region }}"
+        key_material: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+      register: keypair
+
+    - name: Creating database coniguration template
+      template:
+        src: ./setup.sh.j2
+        dest: ./setup.sh
+
+    - set_fact:
+        all_instances: []
+
+    - name: Get old instances
+      ec2_remote_facts:
+        filters:
+          vpc_id: "{{ vpc.vpc.id }}"
+          instance-state-name: running
+          "tag:Name": MyTestApp
+        region: "{{ region }}"
+      register: old_instances
+
+    - name: get old instances ids
+      set_fact:
+        all_instances: "{{old_instances.instances|map(attribute = 'id')|list}}"
+
+    - include: add_remove.yaml
+      with_sequence: start=1 end={{ instance_num }}
+      loop_control:
+        loop_var: instances_num

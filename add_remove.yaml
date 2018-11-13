@@ -1,0 +1,80 @@
+---
+- debug:
+    msg: "old instances ids: {{ all_instances }}"
+
+- name: Create EC2 server
+  ec2:
+    image: ami-41505fab
+    wait: yes
+    instance_type: t2.micro
+    region: "{{ region }}"
+    group_id: "{{ app_sg.group_id }}"
+    vpc_subnet_id: "{{ app_subnet.subnet.id }}"
+    key_name: "{{ keypair.key.name  }}"
+    #count_tag: 1
+    user_data: "{{ lookup('file', './setup.sh') }}"
+    #exact_count: 1
+    instance_tags:
+      Environment: MyTest
+      Name: MyTestApp
+  register: ec2
+
+- name: get new instances ids
+  set_fact:
+    new_instance_ids: "{{ec2.instance_ids}}"
+    all_instances: "{{all_instances}}+{{ec2.instance_ids}}"
+
+
+- name: Create ELB with all instances
+  ec2_elb_lb:
+    name: "app-rolling-lb"
+    state: present
+    security_group_ids:
+      - "{{ elb_sg.group_id }}"
+    region: "{{ region }}"
+    instance_ids: "{{ all_instances }}"
+    subnets:
+      - "{{ app_subnet.subnet.id}}"
+    listeners:
+      - protocol: http
+        load_balancer_port: 80
+        instance_port: 8081
+    health_check:
+        ping_protocol: http # options are http, https, ssl, tcp
+        ping_port: 8081
+        ping_path: "/healthcheck" # not required for tcp or ssl
+        response_timeout: 15 # seconds
+        interval: 30 # seconds
+        unhealthy_threshold: 2
+        healthy_threshold: 2
+    tags:
+      Environment: MyTest
+
+- name: Waiting for instances to become ready
+  ec2_elb_facts:
+    region: "{{ region }}"
+    names: app-rolling-lb
+  register: elb_facts
+  until: elb_facts.elbs[0].instances_inservice_count  == all_instances|length
+  retries: 10
+  delay: 15
+
+- set_fact:
+    all_instances_num: "{{ all_instances|length }}"
+- debug:
+    msg: "{{ all_instances_num }} > {{instances_num}} ? {{ all_instances_num >  instances_num }}"
+
+- name: Terminate instances that were previously launched
+  ec2:
+    state: 'absent'
+    instance_ids: '{{ all_instances.0 }}'
+    region: "{{ region }}"
+    group_id: "{{ app_sg.group_id }}"
+    vpc_subnet_id: "{{ app_subnet.subnet.id }}"
+  when: all_instances_num > instances_num
+
+- name: remove instance_id from all_instances list
+  set_fact:
+    all_instances: "{{all_instances[1:]}}"
+    all_instances_num: "{{all_instances_num|int -1}}"
+  when: all_instances_num > instances_num
