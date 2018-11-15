@@ -21,7 +21,6 @@
 
 - name: get new instances ids
   set_fact:
-    new_instance_ids: "{{ec2.instance_ids}}"
     all_instances: "{{all_instances}}+{{ec2.instance_ids}}"
 
 
@@ -62,7 +61,7 @@
 - set_fact:
     all_instances_num: "{{ all_instances|length }}"
 - debug:
-    msg: "{{ all_instances_num }} > {{instances_num}} ? {{ all_instances_num >  instances_num }}"
+    msg: "{{ all_instances_num }} > {{instance_counter}} ? {{ all_instances_num >  instance_counter }}"
 
 - name: Terminate instances that were previously launched
   ec2:
@@ -71,10 +70,10 @@
     region: "{{ region }}"
     group_id: "{{ app_sg.group_id }}"
     vpc_subnet_id: "{{ app_subnet.subnet.id }}"
-  when: all_instances_num > instances_num
+  when: all_instances_num > instance_counter
 
 - name: remove instance_id from all_instances list
   set_fact:
     all_instances: "{{all_instances[1:]}}"
     all_instances_num: "{{all_instances_num|int -1}}"
-  when: all_instances_num > instances_num
+  when: all_instances_num > instance_counter

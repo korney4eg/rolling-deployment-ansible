@@ -192,4 +192,4 @@
     - include: add_remove.yaml
       with_sequence: start=1 end={{ instance_num }}
       loop_control:
-        loop_var: instances_num
+        loop_var: instance_counter
