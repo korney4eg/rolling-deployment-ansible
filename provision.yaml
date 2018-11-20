@@ -5,11 +5,8 @@
   gather_facts: False
   vars:
     region: eu-west-1
-    db_name: myTestDB
-    db_user: myuser
-    db_password: 12345678
-    version: 2.0.0
-    instance_num: 1
+    version: 2.21
+    instance_num: 2
 
   tasks:
     - name: create VPC
@@ -33,30 +30,6 @@
         tags:
           Environment: MyTest
       register: app_subnet
-
-    - name: db1 subnet
-      ec2_vpc_subnet:
-        state: present
-        vpc_id: "{{ vpc.vpc.id }}"
-        region: "{{region}}"
-        az: "{{region}}a"
-        cidr: "10.10.0.64/26"
-        map_public: no
-        tags:
-          Environment: MyTest
-      register: db_subnet1
-
-    - name: db2 subnet
-      ec2_vpc_subnet:
-        state: present
-        vpc_id: "{{ vpc.vpc.id }}"
-        region: "{{region}}"
-        cidr: "10.10.0.128/26"
-        az: "{{region}}b"
-        map_public: no
-        tags:
-          Environment: MyTest
-      register: db_subnet2
 
     - name: create IGW
       ec2_vpc_igw:
@@ -115,52 +88,6 @@
           Environment: MyTest
       register: app_sg
 
-    - name: Create Security Group for DB server
-      ec2_group:
-        name: db_server_sg
-        description: DB Server
-        vpc_id: "{{ vpc.vpc.id }}"
-        region: "{{ region }}"
-        rules:
-          - proto: tcp
-            ports:
-              - 3306
-            group_id: "{{ app_sg.group_id }}"
-        tags:
-          Environment: MyTest
-      register: db_sg
-
-    - name: Creating RDS subnet group
-      rds_subnet_group:
-        state: present
-        name: norwegian-blue
-        region: "{{ region }}"
-        description: My Fancy Ex Parrot Subnet Group
-        subnets: 
-          - "{{db_subnet1.subnet.id}}"
-          - "{{db_subnet2.subnet.id}}"
-      register: rds_subnet_group
-    - debug:
-        msg: "RDS subnet group: {{rds_subnet_group}}"
-
-    - name: Create DB
-      rds:
-        instance_name: 'database'
-        db_name: "{{ db_name }}"
-        command: create
-        region: "{{ region }}"
-        db_engine: MySQL
-        size: 10
-        instance_type: db.t2.small
-        username: "{{ db_user }}"
-        password: "{{ db_password }}"
-        vpc_security_groups: "{{db_sg.group_id}}"
-        wait: yes
-        subnet: "{{ rds_subnet_group.subnet_group.name }}"
-        tags:
-          Environment: MyTest
-      register: rds
-
     - name: create a new ec2 key pair
       ec2_key:
         name: provisioner
@@ -173,8 +100,26 @@
         src: ./setup.sh.j2
         dest: ./setup.sh
 
-    - set_fact:
-        all_instances: []
+    - name: Get new instances
+      ec2_remote_facts:
+        filters:
+          vpc_id: "{{ vpc.vpc.id }}"
+          instance-state-name: running
+          "tag:Name": MyTestApp
+          "tag:Environment": MyTest
+          "tag:Version": "{{ version }}"
+        region: "{{ region }}"
+      register: new_instances
+
+    - name: set new instances ids if not found previously created
+      set_fact:
+        new_instances: []
+      when: new_instances.instances is not defined
+
+    - name: set new instances ids if found previously created
+      set_fact:
+        new_instances: "{{ new_instances.instances|map(attribute='id')|list }}"
+      when: new_instances.instances is defined
 
     - name: Get old instances
       ec2_remote_facts:
@@ -182,14 +127,41 @@
           vpc_id: "{{ vpc.vpc.id }}"
           instance-state-name: running
           "tag:Name": MyTestApp
+          "tag:Environment": MyTest
         region: "{{ region }}"
       register: old_instances
 
-    - name: get old instances ids
+    - name: set old instances ids if not found previously created
       set_fact:
-        all_instances: "{{old_instances.instances|map(attribute = 'id')|list}}"
+        old_instances: []
+      when: old_instances.instances is not defined
+
+    - name: set old instances ids if found previously created
+      set_fact:
+        old_instances: "{{ old_instances.instances|map(attribute='id')|list }}"
+      when: old_instances.instances is defined
+
+    - name: Remove new instances from old ones
+      set_fact:
+        old_instances: "{{old_instances|difference(new_instances)}}"
+        old_instances_num: "{{old_instances|difference(new_instances)|length}}"
+
+    - debug:
+        msg: "Old instances:{{ old_instances }}"
+
+    - debug:
+        msg: "New instances:{{ new_instances }}"
 
     - include: add_remove.yaml
       with_sequence: start=1 end={{ instance_num }}
       loop_control:
         loop_var: instance_counter
+
+    - name: Terminate all rest instances
+      ec2:
+        state: 'absent'
+        instance_ids: '{{ item }}'
+        region: "{{ region }}"
+        group_id: "{{ app_sg.group_id }}"
+        vpc_subnet_id: "{{ app_subnet.subnet.id }}"
+      with_items: "{{ old_instances}}"

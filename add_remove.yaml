@@ -1,6 +1,9 @@
 ---
+- set_fact:
+    new_instances_num: "{{new_instances|length|int}}"
 - debug:
-    msg: "old instances ids: {{ all_instances }}"
+    msg: "New instances:{{new_instances_num}} < {{ instance_num }}={{ new_instances_num|int < instance_num }}"
+
 
 - name: Create EC2 server
   ec2:
@@ -17,12 +20,26 @@
     instance_tags:
       Environment: MyTest
       Name: MyTestApp
+      Version: "{{ version }}"
   register: ec2
+  when: new_instances_num|int < instance_num
 
-- name: get new instances ids
+- debug:
+    msg: "Newly created instances:{{ ec2 }}"
+
+- name: add newly create instance id to new_instances list
   set_fact:
-    all_instances: "{{all_instances}}+{{ec2.instance_ids}}"
+    new_instances: "{{new_instances}}+{{ec2.instance_ids}}"
+    new_instances_num: "{{new_instances|int + 1}}"
+  when: ec2.changed == True
 
+#- name: add newly create instance id to new_instances list
+#  set_fact:
+#    new_instances: "{{ec2.instances}}"
+#  when: (new_instances_num = 0) and (ec2.changed == True)
+
+- debug:
+    msg: "New instances:{{ new_instances }}"
 
 - name: Create ELB with all instances
   ec2_elb_lb:
@@ -31,7 +48,7 @@
     security_group_ids:
       - "{{ elb_sg.group_id }}"
     region: "{{ region }}"
-    instance_ids: "{{ all_instances }}"
+    instance_ids: "{{ new_instances|union ( old_instances)}}"
     subnets:
       - "{{ app_subnet.subnet.id}}"
     listeners:
@@ -54,26 +71,29 @@
     region: "{{ region }}"
     names: app-rolling-lb
   register: elb_facts
-  until: elb_facts.elbs[0].instances_inservice_count  == all_instances|length
+  until: elb_facts.elbs[0].instances_inservice_count  == (new_instances|union ( old_instances)|length)
   retries: 10
   delay: 15
 
-- set_fact:
-    all_instances_num: "{{ all_instances|length }}"
 - debug:
-    msg: "{{ all_instances_num }} > {{instance_counter}} ? {{ all_instances_num >  instance_counter }}"
+    msg: "ELB facts: {{ elb_facts }}"
+
+- set_fact:
+    old_instances_num: "{{ old_instances|length }}"
+- debug:
+    msg: "{{ old_instances_num }} > {{instance_counter}} ? {{ old_instances_num >  instance_counter }}"
 
 - name: Terminate instances that were previously launched
   ec2:
     state: 'absent'
-    instance_ids: '{{ all_instances.0 }}'
+    instance_ids: '{{ old_instances.0 }}'
     region: "{{ region }}"
     group_id: "{{ app_sg.group_id }}"
     vpc_subnet_id: "{{ app_subnet.subnet.id }}"
-  when: all_instances_num > instance_counter
+  when: ec2.changed == True and old_instances.0 is defined
 
-- name: remove instance_id from all_instances list
+- name: remove instance_id from old_instances list
   set_fact:
-    all_instances: "{{all_instances[1:]}}"
-    all_instances_num: "{{all_instances_num|int -1}}"
-  when: all_instances_num > instance_counter
+    old_instances: "{{old_instances[1:]}}"
+    old_instances_num: "{{old_instances_num|int -1}}"
+  when: ec2.changed == True and old_instances.0 is defined
